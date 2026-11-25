@@ -34,6 +34,25 @@ Since v0.8.4, the config flow now validates and normalises the gateway IPv4 addr
 
 If you have more than one LinkTap gateway, add the integration once for each gateway.
 
+## Local push updates (optional)
+
+By default the integration polls each tap every 10–14 seconds. The gateway can also push status changes to Home Assistant as they happen, so watering state, flow and alerts update almost immediately.
+
+To enable it, open the gateway's admin page, enable **HTTP Client** in the Local HTTP API settings and set the **Server URL** to:
+
+```
+http://<home-assistant-ip>:8123/api/linktap/push
+```
+
+Use Home Assistant's LAN address over plain HTTP; the gateway does not support HTTPS.
+
+- Polling is never turned off. While pushes keep arriving, it slows to once a minute; if no push arrives for 3 minutes, normal polling resumes.
+- Pushed values pass through the same validation as polled ones, including the corrupt-volume protection.
+- The endpoint cannot use a Home Assistant token, so it only accepts frames carrying a configured gateway ID **and** sent from that gateway's IP address. Pushes can only update reported status; they cannot start, stop or pause watering.
+- The gateway supports a single Server URL, so only one Home Assistant instance can receive its pushes.
+
+No configuration change is needed in Home Assistant, and nothing changes if the Server URL is left empty.
+
 ## What the integration creates
 
 A Home Assistant **device** is created for each LinkTap output discovered through the gateway.

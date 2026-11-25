@@ -22,10 +22,21 @@ from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from tenacity import RetryError
 
-from .const import DOMAIN, GW_ID, GW_IP, NAME, PLATFORMS, TAP_ID
+from .const import (
+    DOMAIN,
+    GW_ID,
+    GW_IP,
+    NAME,
+    PLATFORMS,
+    PUSH_POLL_INTERVAL_SECONDS,
+    PUSH_WATCHDOG_SECONDS,
+    TAP_ID,
+)
 from .linktap_local import LinktapLocal
+from .push import async_register_gateway, async_unregister_gateway
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +116,12 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"conf": conf}
     _LOGGER.debug(hass.data[DOMAIN])
+    async_register_gateway(
+        hass,
+        gw_id,
+        {gw_ip},
+        {tap[TAP_ID]: tap["coordinator"] for tap in tap_list},
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Reload entry when its updated.
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -116,7 +133,8 @@ async def async_unload_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bo
     """Unload a component config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        entry_data = hass.data[DOMAIN].pop(entry.entry_id)
+        async_unregister_gateway(hass, entry_data["conf"][GW_ID])
     return unload_ok
 
 
@@ -138,12 +156,47 @@ class LinktapCoordinator(DataUpdateCoordinator):
         self.conf = conf
         self.hass = hass
         self.tap_id = tap_id
+        self._poll_interval = self.update_interval
+        self._last_push = None
         # Serialize all water-plan pause mutations for this tap. Without a lock,
         # two HA callers could both observe an unpaused state and both send cmd 18.
         self._pause_lock = asyncio.Lock()
 
     def get_gw_id(self):
         return self.conf[GW_ID]
+
+    @property
+    def push_active(self) -> bool:
+        """Return True while the gateway is pushing updates for this tap."""
+        if self._last_push is None:
+            return False
+        return (dt_util.utcnow() - self._last_push) < timedelta(
+            seconds=PUSH_WATCHDOG_SECONDS
+        )
+
+    def _next_update_interval(self) -> timedelta:
+        """Poll less often while pushes arrive; fall back otherwise."""
+        if self.push_active:
+            return timedelta(seconds=PUSH_POLL_INTERVAL_SECONDS)
+        return self._poll_interval
+
+    @core.callback
+    def async_handle_push(self, status):
+        """Merge a status pushed by the gateway into the polled data."""
+        if not self.push_active:
+            _LOGGER.debug("Receiving pushed updates for LinkTap %s", self.tap_id)
+        self._last_push = dt_util.utcnow()
+        self.update_interval = self._next_update_interval()
+
+        merged = {**(self.data or {}), **status}
+        try:
+            validated = self._validated_status(merged)
+        except UpdateFailed:
+            # No good status yet to fall back on; wait for the next poll.
+            return
+        if validated is self.data:
+            return  # Rejected reading; keep the last known-good status.
+        self.async_set_updated_data(validated)
 
     def _validated_status(self, data):
         """Return valid status data without allowing corrupt volume readings."""
@@ -249,6 +302,7 @@ class LinktapCoordinator(DataUpdateCoordinator):
 
         #tap_id = self.conf["taps"][TAP_ID]
         gw_id = self.conf[GW_ID]
+        self.update_interval = self._next_update_interval()
 
         retryable_errors = (
             aiohttp.ClientError,
