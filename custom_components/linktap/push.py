@@ -15,8 +15,11 @@ coordinator poll less often while they keep arriving.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import socket
+import time
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -40,23 +43,50 @@ _VIEW_REGISTERED = "view_registered"
 # Frames the gateway sends for a status update. 103 is the unsolicited variant
 # used by the MQTT protocol; accept it here too in case firmware reuses it.
 _STATUS_CMDS = {STATUS_CMD, 103}
+# A gateway configured by hostname may change address (e.g. a new DHCP lease).
+# On a push from an unknown address, re-resolve at most this often.
+_RERESOLVE_SECONDS = 60
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+async def async_resolve_addresses(hass: HomeAssistant, host: str) -> set[str]:
+    """Return the IP addresses pushes from ``host`` may come from."""
+    if _is_ip_literal(host):
+        return {host}
+    try:
+        infos = await hass.loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as err:
+        _LOGGER.debug("Could not resolve LinkTap gateway %s: %s", host, err)
+        return set()
+    return {info[4][0] for info in infos}
 
 
 @callback
 def async_register_gateway(
     hass: HomeAssistant,
     gw_id: str,
+    host: str,
     addresses: set[str],
     coordinators: dict[str, "LinktapCoordinator"],
 ) -> None:
     """Route pushes from ``gw_id`` to its tap coordinators.
 
-    ``addresses`` are the source IPs a push from this gateway may come from.
-    Registers the HTTP view on first use.
+    ``host`` is the configured gateway address and ``addresses`` the source IPs
+    a push from it may come from (see ``async_resolve_addresses``). Registers
+    the HTTP view on first use.
     """
     push_data = hass.data.setdefault(PUSH_DATA, {_GATEWAYS: {}})
     push_data[_GATEWAYS][gw_id] = {
+        "host": host,
         "addresses": set(addresses),
+        "resolved_at": time.monotonic(),
         "coordinators": dict(coordinators),
     }
 
@@ -142,7 +172,7 @@ class LinktapPushView(HomeAssistantView):
             _LOGGER.debug("Ignoring LinkTap push for unknown gateway %s", gw_id)
             return web.Response(status=202)
 
-        if request.remote not in gateway["addresses"]:
+        if not await self._async_source_allowed(hass, gateway, request.remote):
             _LOGGER.warning(
                 "Rejected LinkTap push for gateway %s from unexpected address %s",
                 gw_id,
@@ -168,3 +198,19 @@ class LinktapPushView(HomeAssistantView):
                 continue
             coordinator.async_handle_push(status)
         return web.Response(status=200)
+
+    @staticmethod
+    async def _async_source_allowed(
+        hass: HomeAssistant, gateway: dict[str, Any], remote: str | None
+    ) -> bool:
+        """Check the sender is the gateway, re-resolving a hostname if stale."""
+        if remote in gateway["addresses"]:
+            return True
+        host = gateway["host"]
+        if _is_ip_literal(host):
+            return False
+        if time.monotonic() - gateway["resolved_at"] < _RERESOLVE_SECONDS:
+            return False
+        gateway["resolved_at"] = time.monotonic()
+        gateway["addresses"] = await async_resolve_addresses(hass, host)
+        return remote in gateway["addresses"]

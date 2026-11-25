@@ -25,6 +25,7 @@ from custom_components.linktap.const import (
 from custom_components.linktap.push import (
     LinktapPushView,
     async_register_gateway,
+    async_resolve_addresses,
     async_unregister_gateway,
     datetime_reply,
     extract_statuses,
@@ -44,7 +45,9 @@ def coordinator(hass, mock_linktap_api):
 
 @pytest.fixture
 def registered(hass, coordinator):
-    async_register_gateway(hass, MOCK_GW_ID, {MOCK_GW_IP}, {MOCK_TAP_ID: coordinator})
+    async_register_gateway(
+        hass, MOCK_GW_ID, MOCK_GW_IP, {MOCK_GW_IP}, {MOCK_TAP_ID: coordinator}
+    )
     return coordinator
 
 
@@ -267,8 +270,8 @@ async def test_setup_and_unload_register_gateway(hass, mock_linktap_api):
 def test_view_registered_once(hass, coordinator):
     """The view is added on first registration only, even with several gateways."""
     hass.http = MagicMock()
-    async_register_gateway(hass, "GW1", {"10.0.0.1"}, {"T1": coordinator})
-    async_register_gateway(hass, "GW2", {"10.0.0.2"}, {"T2": coordinator})
+    async_register_gateway(hass, "GW1", "10.0.0.1", {"10.0.0.1"}, {"T1": coordinator})
+    async_register_gateway(hass, "GW2", "10.0.0.2", {"10.0.0.2"}, {"T2": coordinator})
 
     hass.http.register_view.assert_called_once()
     view = hass.http.register_view.call_args.args[0]
@@ -281,5 +284,70 @@ def test_view_registered_once(hass, coordinator):
 def test_view_not_registered_without_http(hass, coordinator):
     """Without the http component, routing still works and nothing crashes."""
     hass.http = None
-    async_register_gateway(hass, MOCK_GW_ID, {MOCK_GW_IP}, {MOCK_TAP_ID: coordinator})
+    async_register_gateway(
+        hass, MOCK_GW_ID, MOCK_GW_IP, {MOCK_GW_IP}, {MOCK_TAP_ID: coordinator}
+    )
     assert not hass.data[PUSH_DATA].get("view_registered")
+
+
+# ---------------------------------------------------------------------------
+# Gateways configured by hostname
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_ip_literal_skips_dns(hass):
+    with patch.object(hass.loop, "getaddrinfo") as getaddrinfo:
+        assert await async_resolve_addresses(hass, "192.168.1.5") == {"192.168.1.5"}
+    getaddrinfo.assert_not_called()
+
+
+async def test_resolve_hostname(hass):
+    infos = [
+        (2, 1, 6, "", ("192.168.1.5", 0)),
+        (10, 1, 6, "", ("fe80::1", 0, 0, 0)),
+    ]
+    with patch.object(hass.loop, "getaddrinfo", AsyncMock(return_value=infos)):
+        assert await async_resolve_addresses(hass, "gw.local") == {
+            "192.168.1.5",
+            "fe80::1",
+        }
+
+
+async def test_resolve_failure_returns_empty(hass):
+    with patch.object(hass.loop, "getaddrinfo", AsyncMock(side_effect=OSError)):
+        assert await async_resolve_addresses(hass, "gw.local") == set()
+
+
+async def test_hostname_gateway_reresolved_after_address_change(hass, coordinator):
+    async_register_gateway(
+        hass, MOCK_GW_ID, "gw.local", {"192.168.1.5"}, {MOCK_TAP_ID: coordinator}
+    )
+    gateway = hass.data[PUSH_DATA]["gateways"][MOCK_GW_ID]
+    frame = _status_frame(is_watering=True)
+
+    # Just resolved: a push from a new address is not re-resolved yet.
+    resolver = AsyncMock(return_value={"192.168.1.9"})
+    with patch("custom_components.linktap.push.async_resolve_addresses", resolver):
+        resp = await LinktapPushView().post(_request(hass, frame, remote="192.168.1.9"))
+    assert resp.status == 403
+    resolver.assert_not_called()
+
+    # Once the cache is stale, the hostname is resolved again and accepted.
+    gateway["resolved_at"] -= 61
+    with patch("custom_components.linktap.push.async_resolve_addresses", resolver):
+        resp = await LinktapPushView().post(_request(hass, frame, remote="192.168.1.9"))
+    assert resp.status == 200
+    assert coordinator.data["is_watering"] is True
+    assert gateway["addresses"] == {"192.168.1.9"}
+
+
+async def test_ip_gateway_never_reresolved(hass, registered):
+    gateway = hass.data[PUSH_DATA]["gateways"][MOCK_GW_ID]
+    gateway["resolved_at"] -= 3600
+    resolver = AsyncMock()
+    with patch("custom_components.linktap.push.async_resolve_addresses", resolver):
+        resp = await LinktapPushView().post(
+            _request(hass, _status_frame(is_watering=True), remote="10.9.9.9")
+        )
+    assert resp.status == 403
+    resolver.assert_not_called()

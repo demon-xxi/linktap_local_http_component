@@ -36,7 +36,11 @@ from .const import (
     TAP_ID,
 )
 from .linktap_local import LinktapLocal
-from .push import async_register_gateway, async_unregister_gateway
+from .push import (
+    async_register_gateway,
+    async_resolve_addresses,
+    async_unregister_gateway,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,7 +123,8 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
     async_register_gateway(
         hass,
         gw_id,
-        {gw_ip},
+        gw_ip,
+        await async_resolve_addresses(hass, gw_ip),
         {tap[TAP_ID]: tap["coordinator"] for tap in tap_list},
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
