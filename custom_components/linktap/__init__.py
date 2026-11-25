@@ -120,9 +120,19 @@ async def async_unload_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bo
     return unload_ok
 
 
-async def async_remove_config_entry_device(hass: core.HomeAssistant, entry: ConfigEntry, device) -> bool:
-    device_registry(hass).async_remove_device(device.id)
-    return True
+async def async_remove_config_entry_device(
+    hass: core.HomeAssistant, entry: ConfigEntry, device: dr.DeviceEntry
+) -> bool:
+    """Allow removing a device only once the gateway no longer reports it.
+
+    Home Assistant removes the device itself when this returns True. A tap the
+    gateway still reports would be recreated on the next reload, so keep it.
+    """
+    taps = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("conf", {}).get(
+        "taps", []
+    )
+    active = {(DOMAIN, tap[TAP_ID]) for tap in taps}
+    return not (device.identifiers & active)
 
 
 class LinktapCoordinator(DataUpdateCoordinator):
