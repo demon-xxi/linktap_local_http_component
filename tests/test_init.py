@@ -178,3 +178,49 @@ async def test_unload_entry_removes_domain_data(hass, config_entry, mock_linktap
 
     assert result is True
     assert config_entry.entry_id not in hass.data.get(DOMAIN, {})
+
+# ---------------------------------------------------------------------------
+# Unique ID migration
+# ---------------------------------------------------------------------------
+
+
+async def test_setup_keys_legacy_entry_by_gateway_id(
+    hass, patched_setup, mock_linktap_api
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id="0123abcd", data={GW_IP: MOCK_GW_IP}, options={}
+    )
+    entry.add_to_hass(hass)
+    with patched_setup:
+        await async_setup_entry(hass, entry)
+    assert entry.unique_id == MOCK_GW_ID
+
+
+async def test_setup_keeps_entry_already_keyed_by_gateway_id(
+    hass, patched_setup, mock_linktap_api
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=MOCK_GW_ID, data={GW_IP: MOCK_GW_IP}, options={}
+    )
+    entry.add_to_hass(hass)
+    with patched_setup, patch.object(
+        hass.config_entries, "async_update_entry"
+    ) as update:
+        await async_setup_entry(hass, entry)
+    update.assert_not_called()
+
+
+async def test_setup_leaves_duplicate_entry_unchanged(
+    hass, patched_setup, mock_linktap_api, caplog
+):
+    MockConfigEntry(
+        domain=DOMAIN, unique_id=MOCK_GW_ID, data={GW_IP: "10.0.0.9"}, options={}
+    ).add_to_hass(hass)
+    duplicate = MockConfigEntry(
+        domain=DOMAIN, unique_id="0123abcd", data={GW_IP: MOCK_GW_IP}, options={}
+    )
+    duplicate.add_to_hass(hass)
+    with patched_setup:
+        assert await async_setup_entry(hass, duplicate)
+    assert duplicate.unique_id == "0123abcd"
+    assert "configured more than once" in caplog.text

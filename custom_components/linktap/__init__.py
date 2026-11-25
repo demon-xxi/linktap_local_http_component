@@ -78,6 +78,7 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
         ) from err
 
     _LOGGER.debug(f"Found GW_ID: {gw_id}")
+    _async_migrate_unique_id(hass, entry, str(gw_id))
 
     if "end_dev" not in gateway_config:
         raise IntegrationError("Linktap Gateway needs to be updated")
@@ -132,6 +133,28 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
+
+
+@core.callback
+def _async_migrate_unique_id(
+    hass: core.HomeAssistant, entry: ConfigEntry, gw_id: str
+) -> None:
+    """Key the entry by its gateway ID.
+
+    Entries created before discovery support carry a random unique ID, which
+    stops Home Assistant matching a discovered or re-added gateway to them.
+    """
+    if entry.unique_id == gw_id:
+        return
+    other = hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, gw_id)
+    if other is not None and other.entry_id != entry.entry_id:
+        _LOGGER.warning(
+            "LinkTap gateway %s is configured more than once; consider removing "
+            "the duplicate entry",
+            gw_id,
+        )
+        return
+    hass.config_entries.async_update_entry(entry, unique_id=gw_id)
 
 
 async def async_unload_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> bool:

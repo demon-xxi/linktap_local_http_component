@@ -3,14 +3,26 @@
     "step": {
       "user": {
         "title": "Connect to LinkTap",
-        "description": "Enter the IPv4 address of your LinkTap gateway.",
+        "description": "Enter the IPv4 address or hostname of your LinkTap gateway, for example 192.168.1.123 or LinkTapGw_XXXX.local. The gateway's Local HTTP API must be enabled.",
         "data": {
-          "gw_ip": "Gateway IP address"
+          "gw_ip": "Gateway IP address or hostname"
         }
+      },
+      "zeroconf_confirm": {
+        "title": "LinkTap gateway found",
+        "description": "Add LinkTap gateway {gw_id} at {host}?"
       }
     },
     "error": {
-      "invalid_gateway_ip": "Enter the LinkTap gateway IPv4 address only, for example 192.168.1.123. Do not include http://, a port, or /api.shtml."
+      "invalid_gateway_ip": "Enter the LinkTap gateway's IPv4 address or hostname only, for example 192.168.1.123 or LinkTapGw_XXXX.local. Do not include http://, a port, or /api.shtml.",
+      "cannot_connect": "Could not reach the LinkTap gateway. Check the address and that the gateway's Local HTTP API is enabled."
+    },
+    "flow_title": "{name}",
+    "abort": {
+      "already_configured": "This LinkTap gateway is already configured.",
+      "cannot_connect": "Could not reach the discovered LinkTap gateway. Check that its Local HTTP API is enabled.",
+      "not_linktap_device": "The discovered device is not a LinkTap gateway.",
+      "not_ipv4_address": "The discovered LinkTap gateway did not report an IPv4 address."
     }
   },
   "options": {
