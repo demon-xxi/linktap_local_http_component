@@ -15,22 +15,28 @@ Then add it from:
 
 **Settings → Devices & services → Add integration → Local HTTP API for LinkTap**
 
-Enter the **IPv4 address of the LinkTap gateway**, for example:
+Enter the **IPv4 address or hostname of the LinkTap gateway**, for example:
 
 ```text
 192.168.1.123
+LinkTapGw_XXXX.local
 ```
 
-Do not enter a URL, port, path, hostname or IPv6 address, for example:
+Do not enter a URL, port, path or IPv6 address, for example:
 
 ```text
 http://192.168.1.123
 192.168.1.123:80
 192.168.1.123/api.shtml
-gateway-hostname.local
 ```
 
-Since v0.8.4, the config flow now validates and normalises the gateway IPv4 address before saving it.
+The config flow contacts the gateway before saving, so its Local HTTP API must be enabled. Each config entry is identified by the gateway's ID, so adding the same gateway again under a new address updates the existing entry instead of creating a duplicate. Entries created by older versions are switched to the gateway ID automatically the next time they load.
+
+### Automatic discovery
+
+If **Enable mDNS responder** is switched on in the gateway's admin page, Home Assistant discovers the gateway and offers it under **Settings → Devices & services**.
+
+Discovery also keeps the stored address current: if a gateway configured by IP address reappears at a new address, for example after a DHCP lease change, the entry is updated and reloaded. An entry configured by hostname is never changed by discovery.
 
 If you have more than one LinkTap gateway, add the integration once for each gateway.
 
