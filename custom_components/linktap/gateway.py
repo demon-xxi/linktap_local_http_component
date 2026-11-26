@@ -42,6 +42,10 @@ GATEWAY_NAME = "LinkTap Gateway"
 GATEWAY_CONFIG_INTERVAL = timedelta(minutes=30)
 MDNS_SERVICE_TYPE = "_http._tcp.local."
 MDNS_TIMEOUT_MS = 3000
+# Shorter wait while setting up, where the lookup delays the integration.
+SETUP_MDNS_TIMEOUT_MS = 2000
+# The gateway's MAC address, stored on the config entry once found over mDNS.
+CONF_MAC = "mac"
 
 _CONNECT_ERRORS = (
     aiohttp.ClientError,
@@ -121,12 +125,22 @@ class LinktapGatewayCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
 @callback
 def async_register_gateway_device(
-    hass: HomeAssistant, entry: ConfigEntry, gateway: LinktapGatewayCoordinator
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    gateway: LinktapGatewayCoordinator,
+    mac: str | None = None,
 ) -> dr.DeviceEntry:
-    """Create or update the gateway's device entry."""
+    """Create or update the gateway's device entry.
+
+    With the MAC address, a device another integration already registered
+    for it (such as a UniFi client) becomes the gateway's device too. Home
+    Assistant only joins devices this way when the device is created.
+    """
+    connections = {(dr.CONNECTION_NETWORK_MAC, mac)} if mac else set()
     return dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, gateway.gw_id)},
+        connections=connections,
         manufacturer=MANUFACTURER,
         model=GATEWAY_MODEL,
         name=GATEWAY_NAME,
@@ -163,7 +177,9 @@ def async_sync_firmware(
         registry.async_update_device(device.id, sw_version=gateway.firmware)
 
 
-async def async_lookup_mdns(hass: HomeAssistant, gw_id: str) -> dict[str, Any]:
+async def async_lookup_mdns(
+    hass: HomeAssistant, gw_id: str, timeout_ms: int = MDNS_TIMEOUT_MS
+) -> dict[str, Any]:
     """Read the gateway's mDNS record: its TXT properties, host name and IPs.
 
     Returns an empty dict when zeroconf is unavailable or the gateway's mDNS
@@ -180,7 +196,7 @@ async def async_lookup_mdns(hass: HomeAssistant, gw_id: str) -> dict[str, Any]:
 
     info = AsyncServiceInfo(MDNS_SERVICE_TYPE, f"LinkTapGw_{gw_id}.{MDNS_SERVICE_TYPE}")
     try:
-        found = await info.async_request(aiozc.zeroconf, MDNS_TIMEOUT_MS)
+        found = await info.async_request(aiozc.zeroconf, timeout_ms)
     except Exception as err:  # noqa: BLE001
         _LOGGER.debug("mDNS lookup of LinkTap gateway %s failed: %s", gw_id, err)
         return {}
@@ -214,10 +230,42 @@ def mac_from_mdns(mdns: dict[str, Any]) -> str | None:
     return dr.format_mac(":".join(digits[i : i + 2] for i in range(0, 12, 2)))
 
 
+@callback
+def _async_store_mac(hass: HomeAssistant, entry: ConfigEntry, mac: str) -> None:
+    if entry.data.get(CONF_MAC) != mac:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_MAC: mac}
+        )
+
+
+async def async_gateway_mac(
+    hass: HomeAssistant, entry: ConfigEntry, gateway: LinktapGatewayCoordinator
+) -> str | None:
+    """Return the gateway's MAC address for setting up its device.
+
+    Uses the address stored on the entry, or asks the gateway over mDNS and
+    stores what it reports. Call it before the entry's update listener is
+    added, since storing the address updates the entry.
+    """
+    stored = entry.data.get(CONF_MAC)
+    if stored:
+        return stored
+    gateway.mdns = await async_lookup_mdns(hass, gateway.gw_id, SETUP_MDNS_TIMEOUT_MS)
+    mac = mac_from_mdns(gateway.mdns)
+    if mac:
+        _async_store_mac(hass, entry, mac)
+    return mac
+
+
 async def async_add_mdns_details(
     hass: HomeAssistant, gateway: LinktapGatewayCoordinator, device_id: str
 ) -> None:
-    """Add the MAC from mDNS to the gateway device, so it merges with UniFi etc."""
+    """Refresh the gateway's mDNS details and add its MAC to the device.
+
+    Runs in the background. A MAC added here does not join the gateway with a
+    device another integration registered; that happens at the next setup,
+    which uses the stored address (see ``async_gateway_mac``).
+    """
     gateway.mdns = await async_lookup_mdns(hass, gateway.gw_id)
     mac = mac_from_mdns(gateway.mdns)
     if mac is None:

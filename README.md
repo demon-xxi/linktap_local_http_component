@@ -59,7 +59,9 @@ The gateway itself also appears as a device, and each tap device is shown as con
 - **Linked timers**: how many paired timers the gateway currently reaches over RF. The `unlinked` attribute lists the ones it does not, which also explains placeholder readings such as a battery level of 0.
 - **Address**: the address Home Assistant uses for the gateway.
 
-If **Enable mDNS responder** is switched on in the gateway's admin page, the gateway's MAC address is read from its mDNS record and added to the device. Home Assistant then shows it as the same device that network integrations such as UniFi report for that MAC address. The mDNS host name and IP addresses appear as attributes of the Address sensor.
+If **Enable mDNS responder** is switched on in the gateway's admin page, the gateway's MAC address is read from its mDNS record and stored with the integration. When a network integration such as UniFi already has a device for that MAC address, the gateway joins it, so its network and LinkTap entities appear on one device page. The mDNS host name and IP addresses appear as attributes of the Address sensor.
+
+Home Assistant only joins devices when the gateway device is created. If the gateway device was created before its MAC address was known (for example, with mDNS off), delete the gateway device from its device page and reload the integration.
 
 The gateway's Local HTTP API does not report uptime, so there is no uptime sensor.
 
