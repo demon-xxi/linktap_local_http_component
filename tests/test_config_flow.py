@@ -169,8 +169,28 @@ class TestUserFlow:
 # ---------------------------------------------------------------------------
 
 
-def _discovery(host="192.168.1.50", name=f"LinkTapGw_{GW}._http._tcp.local."):
-    return SimpleNamespace(name=name, host=host, port=80, type="_http._tcp.local.")
+MDNS_NAME = f"LinkTapGw_{GW}.local"
+
+
+def _discovery(
+    host="192.168.1.50",
+    name=f"LinkTapGw_{GW}._http._tcp.local.",
+    hostname=f"{MDNS_NAME}.",
+):
+    return SimpleNamespace(
+        name=name, host=host, hostname=hostname, port=80, type="_http._tcp.local."
+    )
+
+
+def _fetch_by_host(reachable):
+    """Mock the gateway ID lookup, answering only for hosts in ``reachable``."""
+
+    async def fetch(host):
+        if host not in reachable:
+            raise aiohttp.ClientError
+        return GW
+
+    return AsyncMock(side_effect=fetch)
 
 
 async def _start_zeroconf_flow(hass, info):
@@ -180,10 +200,10 @@ async def _start_zeroconf_flow(hass, info):
 
 
 class TestZeroconfFlow:
-    async def test_discovered_gateway_is_confirmed_and_added(
+    async def test_discovered_gateway_is_added_by_mdns_name(
         self, hass, enable_custom_integrations
     ):
-        with patch(FETCH_ID, AsyncMock(return_value=GW)), patch(
+        with patch(FETCH_ID, AsyncMock(return_value=GW)) as fetch, patch(
             SETUP_ENTRY, AsyncMock(return_value=True)
         ):
             result = await _start_zeroconf_flow(hass, _discovery())
@@ -191,14 +211,96 @@ class TestZeroconfFlow:
             assert result["step_id"] == "zeroconf_confirm"
             assert result["description_placeholders"] == {
                 "gw_id": GW,
-                "host": "192.168.1.50",
+                "host": MDNS_NAME,
             }
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"], user_input={}
             )
         assert result["type"] == FlowResultType.CREATE_ENTRY
-        assert result["data"] == {GW_IP: "192.168.1.50"}
+        assert result["data"] == {GW_IP: MDNS_NAME}
         assert result["result"].unique_id == GW
+        # The gateway is asked for its ID by IP, then reached by name.
+        assert [c.args[0] for c in fetch.await_args_list] == [
+            "192.168.1.50",
+            MDNS_NAME,
+        ]
+
+    async def test_falls_back_to_ip_when_name_does_not_resolve(
+        self, hass, enable_custom_integrations
+    ):
+        with patch(FETCH_ID, _fetch_by_host({"192.168.1.50"})), patch(
+            SETUP_ENTRY, AsyncMock(return_value=True)
+        ):
+            result = await _start_zeroconf_flow(hass, _discovery())
+            assert result["description_placeholders"]["host"] == "192.168.1.50"
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"], user_input={}
+            )
+        assert result["data"] == {GW_IP: "192.168.1.50"}
+
+    async def test_falls_back_to_ip_when_name_answers_as_other_gateway(
+        self, hass, enable_custom_integrations
+    ):
+        async def fetch(host):
+            return GW if host == "192.168.1.50" else "SOMEONE_ELSE"
+
+        with patch(FETCH_ID, AsyncMock(side_effect=fetch)):
+            result = await _start_zeroconf_flow(hass, _discovery())
+        assert result["description_placeholders"]["host"] == "192.168.1.50"
+
+    @pytest.mark.parametrize("hostname", [None, "", "gateway.example.com."])
+    async def test_uses_ip_without_usable_mdns_name(
+        self, hass, enable_custom_integrations, hostname
+    ):
+        with patch(FETCH_ID, AsyncMock(return_value=GW)) as fetch:
+            result = await _start_zeroconf_flow(hass, _discovery(hostname=hostname))
+        assert result["description_placeholders"]["host"] == "192.168.1.50"
+        fetch.assert_awaited_once_with("192.168.1.50")
+
+    async def test_discovered_ip_entry_switches_to_mdns_name(
+        self, hass, enable_custom_integrations
+    ):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            unique_id=GW,
+            source=config_entries.SOURCE_ZEROCONF,
+            data={GW_IP: "192.168.1.10"},
+        )
+        entry.add_to_hass(hass)
+        with patch(FETCH_ID, AsyncMock(return_value=GW)):
+            result = await _start_zeroconf_flow(hass, _discovery("192.168.1.50"))
+        assert result["type"] == FlowResultType.ABORT
+        assert result["reason"] == "already_configured"
+        assert entry.data[GW_IP] == MDNS_NAME
+
+    async def test_discovered_name_entry_falls_back_to_ip_if_name_fails(
+        self, hass, enable_custom_integrations
+    ):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            unique_id=GW,
+            source=config_entries.SOURCE_ZEROCONF,
+            data={GW_IP: "LinkTapGw_OLD.local"},
+        )
+        entry.add_to_hass(hass)
+        with patch(FETCH_ID, _fetch_by_host({"192.168.1.50"})):
+            result = await _start_zeroconf_flow(hass, _discovery("192.168.1.50"))
+        assert result["reason"] == "already_configured"
+        assert entry.data[GW_IP] == "192.168.1.50"
+
+    async def test_entry_already_using_mdns_name_aborts_early(
+        self, hass, enable_custom_integrations
+    ):
+        MockConfigEntry(
+            domain=DOMAIN,
+            unique_id=GW,
+            source=config_entries.SOURCE_ZEROCONF,
+            data={GW_IP: MDNS_NAME},
+        ).add_to_hass(hass)
+        with patch(FETCH_ID, AsyncMock(return_value=GW)) as fetch:
+            result = await _start_zeroconf_flow(hass, _discovery())
+        assert result["reason"] == "already_configured"
+        fetch.assert_not_called()
 
     async def test_other_http_service_is_ignored(
         self, hass, enable_custom_integrations
@@ -226,18 +328,20 @@ class TestZeroconfFlow:
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "cannot_connect"
 
-    async def test_new_dhcp_address_updates_ip_entry(
+    async def test_user_entered_ip_follows_dhcp_change(
         self, hass, enable_custom_integrations
     ):
+        """An IP the user typed stays an IP; only the address is updated."""
         entry = MockConfigEntry(
             domain=DOMAIN, unique_id=GW, data={GW_IP: "192.168.1.10"}
         )
         entry.add_to_hass(hass)
-        with patch(FETCH_ID, AsyncMock(return_value=GW)):
+        with patch(FETCH_ID, AsyncMock(return_value=GW)) as fetch:
             result = await _start_zeroconf_flow(hass, _discovery("192.168.1.50"))
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "already_configured"
         assert entry.data[GW_IP] == "192.168.1.50"
+        fetch.assert_awaited_once_with("192.168.1.50")
 
     async def test_hostname_entry_is_never_overwritten(
         self, hass, enable_custom_integrations

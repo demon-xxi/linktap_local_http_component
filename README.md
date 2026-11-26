@@ -36,7 +36,9 @@ The config flow contacts the gateway before saving, so its Local HTTP API must b
 
 If **Enable mDNS responder** is switched on in the gateway's admin page, Home Assistant discovers the gateway and offers it under **Settings → Devices & services**.
 
-Discovery also keeps the stored address current: if a gateway configured by IP address reappears at a new address, for example after a DHCP lease change, the entry is updated and reloaded. An entry configured by hostname is never changed by discovery.
+A discovered gateway is stored by its mDNS name, `LinkTapGw_<gateway id>.local`, so it keeps working when its IP address changes. If Home Assistant cannot reach the gateway by that name, the IP address is stored instead and is updated whenever the gateway is rediscovered at a new address.
+
+Addresses you type yourself are kept as entered: an IP address is still updated when the gateway reappears elsewhere, for example after a DHCP lease change, and a hostname is never changed. mDNS names only resolve on the gateway's own network segment; if Home Assistant and the gateway are on different VLANs, add the gateway by IP address or DNS name instead.
 
 If you have more than one LinkTap gateway, add the integration once for each gateway.
 
