@@ -88,6 +88,26 @@ def _validated_gateway_host(value: str) -> str | None:
     return hostname
 
 
+def _mdns_hostname(discovery_info: ZeroconfServiceInfo) -> str | None:
+    """Return the gateway's advertised mDNS host name, if it is usable."""
+    hostname = getattr(discovery_info, "hostname", None)
+    if not hostname:
+        return None
+    name = _validated_gateway_host(str(hostname))
+    if name is None or not name.lower().endswith(".local"):
+        return None
+    return name
+
+
+async def _async_reaches_gateway(host: str, gw_id: str) -> bool:
+    """Return True if ``host`` answers as the gateway ``gw_id``."""
+    try:
+        return await _async_fetch_gateway_id(host) == gw_id
+    except _CONNECT_ERRORS as err:
+        _LOGGER.debug("LinkTap gateway %s not reachable by name %s: %s", gw_id, host, err)
+        return False
+
+
 async def _async_fetch_gateway_id(host: str) -> str:
     """Ask the gateway at ``host`` for its ID; raises on any connection error."""
     linker = LinktapLocal()
@@ -149,34 +169,51 @@ class LinktapFlowHandler(config_entries.ConfigFlow):
         instance = discovery_info.name.split(".", 1)[0]
         if not instance.lower().startswith(ZEROCONF_PREFIX):
             return self.async_abort(reason="not_linktap_device")
-        host = str(discovery_info.host)
-        if not _is_ipv4(host):
+        ip = str(discovery_info.host)
+        if not _is_ipv4(ip):
             return self.async_abort(reason="not_ipv4_address")
+        mdns_name = _mdns_hostname(discovery_info)
 
         # The address may belong to an entry created before entries were keyed
         # by gateway ID; that entry is migrated when it next loads.
-        self._async_abort_entries_match({GW_IP: host})
+        self._async_abort_entries_match({GW_IP: ip})
+        if mdns_name:
+            self._async_abort_entries_match({GW_IP: mdns_name})
 
         # Ask the gateway itself for its ID rather than trusting the mDNS name.
         # This also confirms the Local HTTP API is enabled.
         try:
-            gw_id = await _async_fetch_gateway_id(host)
+            gw_id = await _async_fetch_gateway_id(ip)
         except _CONNECT_ERRORS as err:
-            _LOGGER.debug("Discovered LinkTap gateway %s not reachable: %s", host, err)
+            _LOGGER.debug("Discovered LinkTap gateway %s not reachable: %s", ip, err)
             return self.async_abort(reason="cannot_connect")
 
         await self.async_set_unique_id(gw_id)
-        # Follow a DHCP address change, but never replace an address the user
-        # entered as a hostname. The entry's update listener reloads it.
         existing = self.hass.config_entries.async_entry_for_domain_unique_id(
             DOMAIN, gw_id
         )
-        updates = None
-        if existing is not None and _is_ipv4(existing.data.get(GW_IP, "")):
-            updates = {GW_IP: host}
-        self._abort_if_unique_id_configured(updates=updates, reload_on_update=False)
+        if existing is not None and existing.source != config_entries.SOURCE_ZEROCONF:
+            # Keep what the user typed. Only follow a DHCP change of an entered
+            # IPv4 address; a hostname they chose is never replaced.
+            updates = None
+            if _is_ipv4(existing.data.get(GW_IP, "")):
+                updates = {GW_IP: ip}
+            self._abort_if_unique_id_configured(
+                updates=updates, reload_on_update=False
+            )
 
-        self._discovered_host = host
+        # Gateways found over mDNS are stored by their mDNS name, which keeps
+        # working when the gateway's address changes. Fall back to the IP when
+        # Home Assistant cannot reach the gateway by that name.
+        address = ip
+        if mdns_name and await _async_reaches_gateway(mdns_name, gw_id):
+            address = mdns_name
+        # The entry's update listener reloads it when the address changes.
+        self._abort_if_unique_id_configured(
+            updates={GW_IP: address}, reload_on_update=False
+        )
+
+        self._discovered_host = address
         self._discovered_gw_id = gw_id
         self.context["title_placeholders"] = {"name": f"LinkTap gateway {gw_id}"}
         return await self.async_step_zeroconf_confirm()
