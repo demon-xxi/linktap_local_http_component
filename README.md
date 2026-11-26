@@ -51,6 +51,20 @@ The integration creates:
 
 The main switch and valve are functionally equivalent for normal watering control and should remain in sync.
 
+### Gateway device
+
+The gateway itself also appears as a device, and each tap device is shown as connected through it. Its device page shows the gateway ID, its firmware version and a link to its admin page, plus three diagnostic entities:
+
+- **Connectivity**: whether the gateway is answering Home Assistant. It follows the tap polls, so an outage shows within seconds.
+- **Linked timers**: how many paired timers the gateway currently reaches over RF. The `unlinked` attribute lists the ones it does not, which also explains placeholder readings such as a battery level of 0.
+- **Address**: the address Home Assistant uses for the gateway.
+
+If **Enable mDNS responder** is switched on in the gateway's admin page, the gateway's MAC address is read from its mDNS record and added to the device. Home Assistant then shows it as the same device that network integrations such as UniFi report for that MAC address. The mDNS host name and IP addresses appear as attributes of the Address sensor.
+
+The gateway's Local HTTP API does not report uptime, so there is no uptime sensor.
+
+**Download diagnostics** on the integration's page returns the gateway's configuration, its mDNS record and the last status of each tap, which is useful when reporting problems.
+
 ## Instant Watering
 
 For normal Home Assistant instant watering:

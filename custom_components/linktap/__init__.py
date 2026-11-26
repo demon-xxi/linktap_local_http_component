@@ -25,6 +25,12 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from tenacity import RetryError
 
 from .const import DOMAIN, GW_ID, GW_IP, NAME, PLATFORMS, TAP_ID
+from .gateway import (
+    LinktapGatewayCoordinator,
+    async_add_mdns_details,
+    async_link_taps_to_gateway,
+    async_register_gateway_device,
+)
 from .linktap_local import LinktapLocal
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,9 +109,29 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
         "vol_unit": vol_unit,
     }
 
+    # The gateway as a device of its own, which the taps are linked to.
+    conf["gateway"] = LinktapGatewayCoordinator(
+        hass,
+        linker,
+        str(gw_id),
+        gw_ip,
+        gateway_config,
+        [tap["coordinator"] for tap in tap_list],
+    )
+    gateway_device = async_register_gateway_device(hass, entry, conf["gateway"])
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"conf": conf}
     _LOGGER.debug(hass.data[DOMAIN])
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    async_link_taps_to_gateway(
+        hass, gateway_device, [tap[TAP_ID] for tap in tap_list]
+    )
+    # Best effort and slow when mDNS is off, so it does not hold up setup.
+    entry.async_create_background_task(
+        hass,
+        async_add_mdns_details(hass, conf["gateway"], gateway_device.id),
+        f"{DOMAIN} gateway mDNS lookup",
+    )
     # Reload entry when its updated.
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
