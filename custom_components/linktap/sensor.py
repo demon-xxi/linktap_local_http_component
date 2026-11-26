@@ -26,6 +26,7 @@ from homeassistant.util import slugify
 _LOGGER = logging.getLogger(__name__)
 
 from .const import DOMAIN, GW_ID, GW_IP, MANUFACTURER, NAME, TAP_ID
+from .gateway import LinktapGatewayAddress, LinktapGatewayLinkedTaps
 
 # Volume Total is persistent, so a corrupt raw session-volume sample must not be
 # allowed to enter its accumulator. This is deliberately a very generous
@@ -86,6 +87,10 @@ async def async_setup_entry(
         sensors.append(LinktapSensor(coordinator, hass, tap, data_attribute="plan_mode", unit="mode", icon="mdi:note"))
         sensors.append(LinktapSensor(coordinator, hass, tap, data_attribute="plan_sn", unit="sn", icon="mdi:note"))
         sensors.append(LinktapSensor(coordinator, hass, tap, data_attribute="plan_mode_string", unit="mode", icon="mdi:note"))
+    gateway = hass.data[DOMAIN][config.entry_id]["conf"].get("gateway")
+    if gateway is not None:
+        sensors.append(LinktapGatewayLinkedTaps(gateway))
+        sensors.append(LinktapGatewayAddress(gateway))
     async_add_entities(sensors, True)
 
 

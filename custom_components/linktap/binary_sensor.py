@@ -19,6 +19,7 @@ from homeassistant.util import slugify
 _LOGGER = logging.getLogger(__name__)
 
 from .const import DOMAIN, GW_ID, GW_IP, MANUFACTURER, NAME, TAP_ID
+from .gateway import LinktapGatewayConnectivity
 
 
 async def async_setup_entry(
@@ -39,6 +40,9 @@ async def async_setup_entry(
         binary_sensors.append(LinktapBinarySensor(coordinator, hass, tap=tap, data_attribute="is_manual_mode", icon="mdi:account-switch"))
         binary_sensors.append(LinktapBinarySensor(coordinator, hass, tap=tap, data_attribute="is_watering", icon="mdi:water"))
         binary_sensors.append(LinktapBinarySensor(coordinator, hass, tap=tap, data_attribute="is_paused", icon="mdi:pause"))
+    gateway = hass.data[DOMAIN][config.entry_id]["conf"].get("gateway")
+    if gateway is not None:
+        binary_sensors.append(LinktapGatewayConnectivity(gateway))
     async_add_entities(binary_sensors, True)
 
     platform = entity_platform.async_get_current_platform()
