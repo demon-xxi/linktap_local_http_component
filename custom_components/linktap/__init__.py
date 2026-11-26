@@ -38,6 +38,7 @@ from .const import (
 from .gateway import (
     LinktapGatewayCoordinator,
     async_add_mdns_details,
+    async_gateway_mac,
     async_link_taps_to_gateway,
     async_register_gateway_device,
 )
@@ -134,7 +135,9 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
         gateway_config,
         [tap["coordinator"] for tap in tap_list],
     )
-    gateway_device = async_register_gateway_device(hass, entry, conf["gateway"])
+    gateway_device = async_register_gateway_device(
+        hass, entry, conf["gateway"], await async_gateway_mac(hass, entry, conf["gateway"])
+    )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"conf": conf}
     _LOGGER.debug(hass.data[DOMAIN])
@@ -149,12 +152,14 @@ async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry) -> boo
     async_link_taps_to_gateway(
         hass, gateway_device, [tap[TAP_ID] for tap in tap_list]
     )
-    # Best effort and slow when mDNS is off, so it does not hold up setup.
-    entry.async_create_background_task(
-        hass,
-        async_add_mdns_details(hass, conf["gateway"], gateway_device.id),
-        f"{DOMAIN} gateway mDNS lookup",
-    )
+    if not conf["gateway"].mdns:
+        # The MAC came from the entry; refresh the mDNS details without
+        # holding up setup.
+        entry.async_create_background_task(
+            hass,
+            async_add_mdns_details(hass, conf["gateway"], gateway_device.id),
+            f"{DOMAIN} gateway mDNS lookup",
+        )
     # Reload entry when its updated.
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 

@@ -17,12 +17,15 @@ from custom_components.linktap import async_setup_entry
 from custom_components.linktap.const import DOMAIN, GW_IP
 from custom_components.linktap.diagnostics import async_get_config_entry_diagnostics
 from custom_components.linktap.gateway import (
+    CONF_MAC,
     GATEWAY_MODEL,
+    SETUP_MDNS_TIMEOUT_MS,
     LinktapGatewayAddress,
     LinktapGatewayConnectivity,
     LinktapGatewayCoordinator,
     LinktapGatewayLinkedTaps,
     async_add_mdns_details,
+    async_gateway_mac,
     async_lookup_mdns,
     async_register_gateway_device,
     async_sync_firmware,
@@ -373,3 +376,88 @@ async def test_diagnostics(hass, entry):
             "status": {"is_rf_linked": True},
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# Joining a device another integration registered for the same MAC
+# ---------------------------------------------------------------------------
+
+
+async def test_gateway_joins_existing_network_device(hass, entry):
+    """A UniFi-style client device with the same MAC becomes the gateway."""
+    unifi_entry = MockConfigEntry(domain="unifi")
+    unifi_entry.add_to_hass(hass)
+    registry = dr.async_get(hass)
+    unifi_device = registry.async_get_or_create(
+        config_entry_id=unifi_entry.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, MAC)},
+        default_name="LinkTap_Gateway_B239",
+    )
+
+    device = async_register_gateway_device(hass, entry, _gateway(hass), MAC)
+
+    assert device.id == unifi_device.id
+    assert device.identifiers == {(DOMAIN, MOCK_GW_ID)}
+    assert set(device.config_entries) == {entry.entry_id, unifi_entry.entry_id}
+    assert device.name == "LinkTap Gateway"
+
+
+async def test_stored_mac_is_used_without_lookup(hass, entry):
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_MAC: MAC})
+    lookup = AsyncMock()
+    with patch("custom_components.linktap.gateway.async_lookup_mdns", lookup):
+        assert await async_gateway_mac(hass, entry, _gateway(hass)) == MAC
+    lookup.assert_not_called()
+
+
+async def test_mac_found_over_mdns_is_stored(hass, entry):
+    gateway = _gateway(hass)
+    mdns = {
+        "properties": {"MAC": "02:4B:41:23:B2:39"},
+        "hostname": "h",
+        "addresses": [],
+    }
+    with patch(
+        "custom_components.linktap.gateway.async_lookup_mdns",
+        AsyncMock(return_value=mdns),
+    ) as lookup:
+        assert await async_gateway_mac(hass, entry, gateway) == MAC
+    assert lookup.await_args.args[2] == SETUP_MDNS_TIMEOUT_MS
+    assert entry.data[CONF_MAC] == MAC
+    assert gateway.mdns == mdns
+
+
+async def test_no_mac_without_mdns(hass, entry):
+    with patch(
+        "custom_components.linktap.gateway.async_lookup_mdns",
+        AsyncMock(return_value={}),
+    ):
+        assert await async_gateway_mac(hass, entry, _gateway(hass)) is None
+    assert CONF_MAC not in entry.data
+
+
+async def test_setup_joins_network_device_by_mac(hass, entry, mock_linktap_api):
+    unifi_entry = MockConfigEntry(domain="unifi")
+    unifi_entry.add_to_hass(hass)
+    registry = dr.async_get(hass)
+    unifi_device = registry.async_get_or_create(
+        config_entry_id=unifi_entry.entry_id,
+        connections={(dr.CONNECTION_NETWORK_MAC, MAC)},
+    )
+    mdns = {"properties": {"MAC": MAC}, "hostname": "h", "addresses": [MOCK_GW_IP]}
+    lookup = AsyncMock(return_value=mdns)
+    with patch(
+        "custom_components.linktap.LinktapLocal", return_value=mock_linktap_api
+    ), patch.object(
+        hass.config_entries, "async_forward_entry_setups", AsyncMock(return_value=True)
+    ), patch(
+        "custom_components.linktap.gateway.async_lookup_mdns", lookup
+    ):
+        assert await async_setup_entry(hass, entry)
+        await hass.async_block_till_done()
+
+    gateway_device = registry.async_get_device(identifiers={(DOMAIN, MOCK_GW_ID)})
+    assert gateway_device.id == unifi_device.id
+    assert entry.data[CONF_MAC] == MAC
+    # Found during setup, so no second lookup in the background.
+    lookup.assert_awaited_once()
